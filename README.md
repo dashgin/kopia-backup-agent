@@ -61,6 +61,15 @@ let Kopia's zstd compress after content-defined chunking.
 objects live in the globals. A restore without them comes back with no logins and
 no permissions.
 
+**Skipping tables you would never restore.** `PG_DUMP_ARGS_<label>` passes extra
+flags to one source's `pg_dump` — usually `--exclude-table-data` for a large table
+whose contents are scraped or derived and can simply be re-fetched. Use
+`--exclude-table-data`, not `--exclude-table`: the first keeps the schema and drops
+the rows, the second removes the table and breaks anything that references it.
+Check for foreign keys pointing at the table before excluding it, or the restore
+will fail on constraint violations. Only `PG_SOURCE_*` supports this —
+`pg_dumpall` has no table filter.
+
 **Persistent staging volume.** An earlier sidecar staged into `mktemp -d`, so
 `rclone sync` re-downloaded the entire media bucket every night onto the
 container's writable layer. It eventually filled the disk and died — silently,

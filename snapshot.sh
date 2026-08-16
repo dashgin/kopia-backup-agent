@@ -114,14 +114,33 @@ for var in $(env | sed -n 's/^\(PG_SOURCE_[A-Za-z0-9_]*\)=.*/\1/p' | sort); do
   log "dumping postgres: $label"
   target="${STAGING}/postgres/${label}.dump"
 
+  # Optional extra pg_dump flags for this source, e.g.
+  #   PG_DUMP_ARGS_shop=--exclude-table-data=public.scraped_listings
+  #
+  # The usual reason is a large table whose contents are derived from somewhere
+  # else and can simply be re-fetched, where backing it up nightly costs real
+  # money for data you would never restore.
+  #
+  # Prefer --exclude-table-data over --exclude-table: it keeps the table's
+  # definition, indexes and constraints and drops only the rows, so the restored
+  # database still has a schema the application can start against. Excluding the
+  # table outright leaves anything referencing it broken.
+  #
+  # Deliberately unquoted below so multiple flags word-split into separate
+  # arguments. Keep values free of spaces and shell metacharacters.
+  args_var="PG_DUMP_ARGS_${label}"
+  extra_args="${!args_var:-}"
+  [ -n "$extra_args" ] && log "  extra pg_dump args: ${extra_args}"
+
   # Remove the previous dump FIRST. Staging is persistent, so a failed dump
   # would otherwise leave yesterday's file in place and the snapshot would
   # quietly present stale data as though it were current — the worst kind of
   # backup bug, because it looks like success.
   rm -f "$target"
 
+  # shellcheck disable=SC2086
   if ! pg_dump --format=custom --compress=0 --no-owner --no-privileges \
-       --file="$target" "$url" 2>"${STAGING}/postgres/.${label}.err"; then
+       $extra_args --file="$target" "$url" 2>"${STAGING}/postgres/.${label}.err"; then
     note_failure "$label" "pg_dump failed for $label: $(tail -1 "${STAGING}/postgres/.${label}.err")"
     rm -f "$target" "${STAGING}/postgres/.${label}.err"
     continue

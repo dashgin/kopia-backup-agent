@@ -1,0 +1,58 @@
+# Variant for hosts where a database is NOT reachable on dokploy-network.
+#
+# Compose-managed databases sit on their own project network (e.g.
+# `myapp-prod-ab12cd_default`) and are unreachable from a container attached only
+# to dokploy-network — the connection simply times out. Rather than publishing
+# the database's port, or editing that application's compose to widen its
+# exposure, the backup client joins the application's existing network read-only.
+# Nothing about the application changes.
+#
+# Set EXTRA_NETWORK to the network's real Docker name. Find it with:
+#   docker inspect <db-container> --format '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+#
+# The name usually contains the Dokploy appName suffix, so it changes if that
+# service is recreated — a deploy that suddenly cannot resolve the database is
+# the symptom.
+#
+# Keep the service definition below in sync with docker-compose.yml.
+
+services:
+  kopia:
+    image: ghcr.io/dashgin/kopia-backup-agent:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    hostname: ${KOPIA_HOSTNAME:-kopia-client}
+
+    env_file:
+      - .env
+
+    environment:
+      - KOPIA_CACHE_DIRECTORY=/cache
+      - KOPIA_LOG_DIR=/logs
+      - KOPIA_CHECK_FOR_UPDATES=false
+      - SNAPSHOT_DESCRIPTION=${SNAPSHOT_DESCRIPTION:-nightly}
+      - BACKUP_AT=${BACKUP_AT:-03:00}
+      - MIN_FREE_MB=${MIN_FREE_MB:-2048}
+
+    volumes:
+      - kopia-staging:/staging
+      - kopia-cache:/cache
+      - kopia-logs:/logs
+      - kopia-config:/root/.config/kopia
+
+    networks:
+      - dokploy-network
+      - extra
+
+volumes:
+  kopia-staging:
+  kopia-cache:
+  kopia-logs:
+  kopia-config:
+
+networks:
+  dokploy-network:
+    external: true
+  # Created by the application's own compose project, not by this file.
+  extra:
+    name: ${EXTRA_NETWORK}
+    external: true
