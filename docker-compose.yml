@@ -1,0 +1,66 @@
+services:
+  kopia:
+    # Built once by CI and pulled from GHCR — never built on the host. Building
+    # per host is what tied every deploy to a Git provider, and a provider scoped
+    # to the wrong Dokploy organisation is what left one host with no backup for
+    # five days. The package is public, so no pull credential is needed.
+    #
+    # Pin IMAGE_TAG to a commit sha in the host's environment. The default is
+    # `latest` so a first deploy works before you have a sha to pin.
+    image: ghcr.io/dashgin/kopia-backup-agent:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+
+    # Kopia tags every snapshot as user@hostname. Pinning it keeps the source
+    # named e.g. "root@web-1" in the UI instead of a container id that changes
+    # on redeploy and orphans the snapshot history.
+    hostname: ${KOPIA_HOSTNAME:-kopia-client}
+
+    # Everything set in the Dokploy Environment is passed straight through.
+    # That is what lets a host declare any number of sources without editing
+    # this file:
+    #
+    #   PG_SOURCE_app=postgresql://user:pass@project-db-xxxxxx:5432/app
+    #   RCLONE_SOURCE_media=s3:example-media
+    #
+    # snapshot.sh discovers every PG_SOURCE_* and RCLONE_SOURCE_* at runtime.
+    env_file:
+      - .env
+
+    environment:
+      # Non-secret defaults. Anything here can be overridden from .env.
+      - KOPIA_CACHE_DIRECTORY=/cache
+      - KOPIA_LOG_DIR=/logs
+      - KOPIA_CHECK_FOR_UPDATES=false
+      # B2_BUCKET / B2_ENDPOINT / B2_REGION are deliberately not defaulted here.
+      # They identify a specific repository, so they belong with the credentials
+      # in .env rather than in a public file. Missing values fail loudly at the
+      # connect step, which reports down to Uptime Kuma.
+      - SNAPSHOT_DESCRIPTION=${SNAPSHOT_DESCRIPTION:-nightly}
+      # Time of day, UTC, that this host takes its backup. Stagger it across
+      # hosts so they do not all upload at once.
+      - BACKUP_AT=${BACKUP_AT:-03:00}
+      # Refuse to start a run that cannot finish, rather than filling the disk.
+      - MIN_FREE_MB=${MIN_FREE_MB:-2048}
+
+    volumes:
+      # Persistent staging is the fix for the bug that killed the restic
+      # sidecar: it used `mktemp -d`, so rclone re-downloaded the entire bucket
+      # onto the container's writable layer every night.
+      - kopia-staging:/staging
+      - kopia-cache:/cache
+      - kopia-logs:/logs
+      # Repository connection persists across restarts.
+      - kopia-config:/root/.config/kopia
+
+    networks:
+      - dokploy-network
+
+volumes:
+  kopia-staging:
+  kopia-cache:
+  kopia-logs:
+  kopia-config:
+
+networks:
+  dokploy-network:
+    external: true
