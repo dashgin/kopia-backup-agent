@@ -1,0 +1,57 @@
+# Variant for a host with databases on TWO different application-private
+# networks. Same reasoning as docker-compose.extra-network.yml, which covers the
+# single-network case — see that file for why the client joins the application's
+# network instead of the application publishing a port.
+#
+# Compose cannot make a network declaration conditional, so an unset variable
+# here fails the deploy rather than being ignored. Both EXTRA_NETWORK and
+# EXTRA_NETWORK_2 must be set. Use the single-network file if you only need one.
+#
+#   EXTRA_NETWORK=myapp-prod-ab12cd_default
+#   EXTRA_NETWORK_2=otherapp-prod-ef34gh_default
+#
+# Keep the service definition below in sync with docker-compose.yml.
+
+services:
+  kopia:
+    image: ghcr.io/dashgin/kopia-backup-agent:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    hostname: ${KOPIA_HOSTNAME:-kopia-client}
+
+    env_file:
+      - .env
+
+    environment:
+      - KOPIA_CACHE_DIRECTORY=/cache
+      - KOPIA_LOG_DIR=/logs
+      - KOPIA_CHECK_FOR_UPDATES=false
+      - SNAPSHOT_DESCRIPTION=${SNAPSHOT_DESCRIPTION:-nightly}
+      - BACKUP_AT=${BACKUP_AT:-03:00}
+      - MIN_FREE_MB=${MIN_FREE_MB:-2048}
+
+    volumes:
+      - kopia-staging:/staging
+      - kopia-cache:/cache
+      - kopia-logs:/logs
+      - kopia-config:/root/.config/kopia
+
+    networks:
+      - dokploy-network
+      - extra
+      - extra2
+
+volumes:
+  kopia-staging:
+  kopia-cache:
+  kopia-logs:
+  kopia-config:
+
+networks:
+  dokploy-network:
+    external: true
+  extra:
+    name: ${EXTRA_NETWORK}
+    external: true
+  extra2:
+    name: ${EXTRA_NETWORK_2}
+    external: true
