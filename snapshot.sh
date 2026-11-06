@@ -101,8 +101,15 @@ mirror() {
     kopia --config-file="$MIRROR_CONFIG" "$@"
 }
 
+# PRIMARY_REPO=off skips the B2 repository entirely, for a host whose data
+# should live only in the mirror. Example: Praxis media is too big for the B2
+# free tier. Off needs a mirror, otherwise nothing would be backed up.
 PRIMARY_READY=1
-if ! kopia repository status >/dev/null 2>&1; then
+if [ "${PRIMARY_REPO:-on}" = "off" ]; then
+  [ -n "$MIRROR_PATH" ] || fail "PRIMARY_REPO=off but no MIRROR_RCLONE_PATH: nothing would be backed up"
+  log "primary repository disabled (PRIMARY_REPO=off); mirror only"
+  PRIMARY_READY=0
+elif ! kopia repository status >/dev/null 2>&1; then
   log "connecting to repository"
   if ! kopia repository connect s3 \
       --bucket="$B2_BUCKET" \
