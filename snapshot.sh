@@ -76,16 +76,52 @@ note_failure() {  # note_failure <label> <detail>
 }
 
 # --- connect (idempotent; config persists on the config volume) --------------
+# Optional second repository, e.g. on Google Drive, so one provider failing
+# (a B2 storage cap, an expired key) no longer means no backup at all:
+#
+#   MIRROR_RCLONE_PATH=gdrive:kopia/<host>     enables it (rclone remote:path)
+#   MIRROR_KOPIA_PASSWORD=                     defaults to KOPIA_PASSWORD
+#   RCLONE_CONFIG_GDRIVE_*                     defines the `gdrive` remote
+#
+# Each repository is snapshotted independently: one failing is reported as a
+# partial run, and the run only fails outright when neither took a snapshot.
+MIRROR_PATH="${MIRROR_RCLONE_PATH:-}"
+MIRROR_CONFIG="$(dirname "${KOPIA_CONFIG_PATH:-/app/config/repository.config}")/mirror.config"
+mirror() { KOPIA_PASSWORD="${MIRROR_KOPIA_PASSWORD:-${KOPIA_PASSWORD:-}}" kopia --config-file="$MIRROR_CONFIG" "$@"; }
+
+PRIMARY_READY=1
 if ! kopia repository status >/dev/null 2>&1; then
   log "connecting to repository"
-  kopia repository connect s3 \
-    --bucket="$B2_BUCKET" \
-    --endpoint="$B2_ENDPOINT" \
-    --region="$B2_REGION" \
-    --access-key="$B2_KEY_ID" \
-    --secret-access-key="$B2_APP_KEY" \
-    || fail "could not connect to repository"
+  if ! kopia repository connect s3 \
+      --bucket="$B2_BUCKET" \
+      --endpoint="$B2_ENDPOINT" \
+      --region="$B2_REGION" \
+      --access-key="$B2_KEY_ID" \
+      --secret-access-key="$B2_APP_KEY"; then
+    [ -n "$MIRROR_PATH" ] || fail "could not connect to repository"
+    note_failure primary-repo "could not connect to the primary (B2) repository"
+    PRIMARY_READY=0
+  fi
 fi
+
+MIRROR_READY=0
+if [ -n "$MIRROR_PATH" ]; then
+  MIRROR_READY=1
+  if ! mirror repository status >/dev/null 2>&1; then
+    log "connecting to mirror repository: $MIRROR_PATH"
+    # Connect first; create only when there is nothing there yet. `create`
+    # refuses to overwrite an existing repository, so a connect that failed for
+    # a transient reason cannot clobber one.
+    if ! mirror repository connect rclone --remote-path="$MIRROR_PATH" \
+          --cache-directory=/cache/mirror >/dev/null 2>&1 \
+       && ! mirror repository create rclone --remote-path="$MIRROR_PATH" \
+          --cache-directory=/cache/mirror; then
+      note_failure mirror-repo "could not connect to or create the mirror repository at $MIRROR_PATH"
+      MIRROR_READY=0
+    fi
+  fi
+fi
+[ "$PRIMARY_READY" = 1 ] || [ "$MIRROR_READY" = 1 ] || fail "no repository is reachable"
 
 # --- preflight ---------------------------------------------------------------
 # The restic sidecar this replaces staged into `mktemp -d` on the container's
@@ -253,16 +289,44 @@ done
 # --- snapshot ----------------------------------------------------------------
 # Reached whenever at least one source worked, so a single dead database costs
 # only that database rather than the whole host's backup.
-log "creating snapshot of $STAGING"
-kopia snapshot create "$STAGING" \
-  --description "${SNAPSHOT_DESCRIPTION:-nightly}" \
-  || fail "kopia snapshot failed"
-
-# Prove the snapshot exists before reporting green. A job that reports success
+#
+# Prove each snapshot exists before counting it. A job that reports success
 # without checking is how the previous backup stayed broken for four days.
-COUNT=$(kopia snapshot list "$STAGING" --json 2>/dev/null | grep -c '"startTime"' || echo 0)
-[ "${COUNT:-0}" -gt 0 ] || fail "snapshot command succeeded but none is listed"
-log "snapshots for this source: $COUNT"
+SNAPSHOTS_OK=0
+
+if [ "$PRIMARY_READY" = 1 ]; then
+  log "creating snapshot of $STAGING (primary)"
+  if kopia snapshot create "$STAGING" --description "${SNAPSHOT_DESCRIPTION:-nightly}"; then
+    COUNT=$(kopia snapshot list "$STAGING" --json 2>/dev/null | grep -c '"startTime"' || echo 0)
+    if [ "${COUNT:-0}" -gt 0 ]; then
+      log "primary: snapshots for this source: $COUNT"
+      SNAPSHOTS_OK=$((SNAPSHOTS_OK + 1))
+    else
+      [ -n "$MIRROR_PATH" ] || fail "snapshot command succeeded but none is listed"
+      note_failure primary-repo "primary snapshot succeeded but none is listed"
+    fi
+  else
+    [ -n "$MIRROR_PATH" ] || fail "kopia snapshot failed"
+    note_failure primary-repo "kopia snapshot to the primary (B2) repository failed"
+  fi
+fi
+
+if [ "$MIRROR_READY" = 1 ]; then
+  log "creating snapshot of $STAGING (mirror: $MIRROR_PATH)"
+  if mirror snapshot create "$STAGING" --description "${SNAPSHOT_DESCRIPTION:-nightly}"; then
+    COUNT=$(mirror snapshot list "$STAGING" --json 2>/dev/null | grep -c '"startTime"' || echo 0)
+    if [ "${COUNT:-0}" -gt 0 ]; then
+      log "mirror: snapshots for this source: $COUNT"
+      SNAPSHOTS_OK=$((SNAPSHOTS_OK + 1))
+    else
+      note_failure mirror-repo "mirror snapshot succeeded but none is listed"
+    fi
+  else
+    note_failure mirror-repo "kopia snapshot to the mirror repository failed"
+  fi
+fi
+
+[ "$SNAPSHOTS_OK" -gt 0 ] || fail "no repository accepted the snapshot"
 
 # --- report ------------------------------------------------------------------
 if [ -n "$FAILED_SOURCES" ]; then
@@ -278,8 +342,9 @@ if [ -n "$FAILED_SOURCES" ]; then
 Failed: ${list}
 Succeeded: ${FOUND} source(s)
 
-A snapshot WAS taken and contains everything that did dump — the failed
-sources are simply absent from it, not stale.
+A snapshot WAS taken in at least one repository and contains everything that
+did dump. A failed source is absent from it, not stale; a failed *-repo means
+that repository has no snapshot from this run.
 ${FAILED_DETAIL}"
   exit 1
 fi
