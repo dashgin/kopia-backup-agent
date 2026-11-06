@@ -87,7 +87,19 @@ note_failure() {  # note_failure <label> <detail>
 # partial run, and the run only fails outright when neither took a snapshot.
 MIRROR_PATH="${MIRROR_RCLONE_PATH:-}"
 MIRROR_CONFIG="$(dirname "${KOPIA_CONFIG_PATH:-/app/config/repository.config}")/mirror.config"
-mirror() { KOPIA_PASSWORD="${MIRROR_KOPIA_PASSWORD:-${KOPIA_PASSWORD:-}}" kopia --config-file="$MIRROR_CONFIG" "$@"; }
+# The mirror needs its OWN cache directory, set through the environment and not
+# only with --cache-directory. With the shared KOPIA_CACHE_DIRECTORY, kopia 0.23
+# picks up the primary repository's cached blob config, including B2's
+# COMPLIANCE object lock, and writes it into the new repository. Every write then
+# fails on a backend without object lock ("blob-retention: unsupported put-blob
+# option"). Verified 2026-11-07: an empty environment creates cleanly, and adding
+# only KOPIA_CACHE_DIRECTORY=/cache reproduces the failure.
+MIRROR_CACHE="${KOPIA_CACHE_DIRECTORY:-/cache}/mirror"
+mirror() {
+  KOPIA_PASSWORD="${MIRROR_KOPIA_PASSWORD:-${KOPIA_PASSWORD:-}}" \
+  KOPIA_CACHE_DIRECTORY="$MIRROR_CACHE" \
+    kopia --config-file="$MIRROR_CONFIG" "$@"
+}
 
 PRIMARY_READY=1
 if ! kopia repository status >/dev/null 2>&1; then
@@ -113,9 +125,9 @@ if [ -n "$MIRROR_PATH" ]; then
     # refuses to overwrite an existing repository, so a connect that failed for
     # a transient reason cannot clobber one.
     if ! mirror repository connect rclone --remote-path="$MIRROR_PATH" \
-          --cache-directory=/cache/mirror >/dev/null 2>&1 \
+          --cache-directory="$MIRROR_CACHE" >/dev/null 2>&1 \
        && ! mirror repository create rclone --remote-path="$MIRROR_PATH" \
-          --cache-directory=/cache/mirror; then
+          --cache-directory="$MIRROR_CACHE"; then
       note_failure mirror-repo "could not connect to or create the mirror repository at $MIRROR_PATH"
       MIRROR_READY=0
     fi
