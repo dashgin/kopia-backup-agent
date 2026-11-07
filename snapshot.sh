@@ -129,6 +129,7 @@ elif ! primary repository status >/dev/null 2>&1; then
       --bucket="$B2_BUCKET" \
       --endpoint="$B2_ENDPOINT" \
       --region="$B2_REGION" \
+      ${B2_PREFIX:+--prefix="$B2_PREFIX"} \
       --access-key="$B2_KEY_ID" \
       --secret-access-key="$B2_APP_KEY"; then
     [ -n "$MIRROR_PATH" ] || fail "could not connect to repository"
