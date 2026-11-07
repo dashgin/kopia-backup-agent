@@ -101,6 +101,20 @@ mirror() {
     kopia --config-file="$MIRROR_CONFIG" "$@"
 }
 
+# The primary gets its own config file and cache directory too, named by a
+# generation number. Kopia keeps a copy of the repository's format blob in the
+# cache and goes on "connecting" to a deleted repository from it: on 2026-11-07,
+# after the B2 bucket was emptied, an agent connected to the empty bucket and
+# wrote orphan blobs. Bump PRIMARY_REPO_GENERATION whenever the B2 repository is
+# recreated, so every agent connects fresh instead of trusting the old cache.
+PRIMARY_GENERATION="${PRIMARY_REPO_GENERATION:-2}"
+PRIMARY_CONFIG="$(dirname "${KOPIA_CONFIG_PATH:-/root/.config/kopia/repository.config}")/primary-${PRIMARY_GENERATION}.config"
+PRIMARY_CACHE="${KOPIA_CACHE_DIRECTORY:-/cache}/primary-${PRIMARY_GENERATION}"
+primary() {
+  KOPIA_CACHE_DIRECTORY="$PRIMARY_CACHE" \
+    kopia --config-file="$PRIMARY_CONFIG" "$@"
+}
+
 # PRIMARY_REPO=off skips the B2 repository entirely, for a host whose data
 # should live only in the mirror. Example: Praxis media is too big for the B2
 # free tier. Off needs a mirror, otherwise nothing would be backed up.
@@ -109,9 +123,9 @@ if [ "${PRIMARY_REPO:-on}" = "off" ]; then
   [ -n "$MIRROR_PATH" ] || fail "PRIMARY_REPO=off but no MIRROR_RCLONE_PATH: nothing would be backed up"
   log "primary repository disabled (PRIMARY_REPO=off); mirror only"
   PRIMARY_READY=0
-elif ! kopia repository status >/dev/null 2>&1; then
+elif ! primary repository status >/dev/null 2>&1; then
   log "connecting to repository"
-  if ! kopia repository connect s3 \
+  if ! primary repository connect s3 --cache-directory="$PRIMARY_CACHE" \
       --bucket="$B2_BUCKET" \
       --endpoint="$B2_ENDPOINT" \
       --region="$B2_REGION" \
@@ -315,8 +329,8 @@ SNAPSHOTS_OK=0
 
 if [ "$PRIMARY_READY" = 1 ]; then
   log "creating snapshot of $STAGING (primary)"
-  if kopia snapshot create "$STAGING" --description "${SNAPSHOT_DESCRIPTION:-nightly}"; then
-    COUNT=$(kopia snapshot list "$STAGING" --json 2>/dev/null | grep -c '"startTime"' || echo 0)
+  if primary snapshot create "$STAGING" --description "${SNAPSHOT_DESCRIPTION:-nightly}"; then
+    COUNT=$(primary snapshot list "$STAGING" --json 2>/dev/null | grep -c '"startTime"' || echo 0)
     if [ "${COUNT:-0}" -gt 0 ]; then
       log "primary: snapshots for this source: $COUNT"
       SNAPSHOTS_OK=$((SNAPSHOTS_OK + 1))
